@@ -1,0 +1,28 @@
+DATA_DIR: data/
+RESULTS_DIR: results/
+LOGS_DIR: logs/
+
+SAMPLES:
+  011425_MiSeq:
+    reads:
+        - 000000000-GP7HJ_Undetermined_S0_L001_R1_001
+        - 000000000-GP7HJ_Undetermined_S0_L001_R2_001
+        - 000000000-GP7HJ_Undetermined_S0_L001_R3_001
+  061324_MiSeq:
+    reads:
+        - 000000000-GLTD9_Undetermined_S0_L001_R1_001
+        - 000000000-GLTD9_Undetermined_S0_L001_R2_001
+  082224_MiSeq:
+    reads:
+        - 000000000-GM5RM_Undetermined_S0_L001_R1_001
+        - 000000000-GM5RM_Undetermined_S0_L001_R2_001
+  110724_MiSeq:
+    reads:
+        - 000000000-GNHNL_Undetermined_S0_L001_R1_001
+        - 000000000-GNHNL_Undetermined_S0_L001_R2_001
+  112224_MiSeq:
+    reads:
+        - Undetermined_S0_L001_R1_001
+  121924_MiSeq:
+    reads:
+        - Undetermined_S0_L001_R1_001
