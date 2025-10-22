@@ -1,3 +1,7 @@
+import os
+import sys
+import glob
+
 # Load config
 if "--configfile" in sys.argv:
     i = sys.argv.index("--configfile")
@@ -7,29 +11,97 @@ else:
     config_path = "config/config.yaml"
     configfile: config_path
 
+RESOURCES_DIR = config["RESOURCES_DIR"]
 DATA_DIR = config["DATA_DIR"]
 RESULTS_DIR = config["RESULTS_DIR"]
 LOGS_DIR = config["LOGS_DIR"]
-
 SAMPLES = config["SAMPLES"]
+
+DEMULTIPLEX_SAMPLES = {}
+for sample in SAMPLES.keys():
+    file_prefix = SAMPLES[sample]['reads']
+    for index in SAMPLES[sample].get('index_seqs', []):
+        demux_key = f"{sample}_{index}"
+        DEMULTIPLEX_SAMPLES[demux_key] = {
+            'sample': sample,
+            'index': index,
+            'reads': f"{file_prefix}_{index}",
+            'file_prefix': file_prefix,
+        }
+
+def demux_samples_for_wildcard(wc):
+    demux_key = wc.sample
+    if demux_key not in DEMULTIPLEX_SAMPLES:
+        raise ValueError(f"Unknown demux sample: {demux_key}")
+
+    info = DEMULTIPLEX_SAMPLES[demux_key]
+    # Ensure the demultiplex checkpoint for the originating input sample ran
+    chk = checkpoints.demultiplex.get(input_sample=info['sample'])
+
+    out_dir = os.path.join(os.path.dirname(chk.output[0]), demux_key)
+
+    return os.path.join(out_dir, f"{info['reads']}.fastq.gz")
+
+# define sample dirs as output of demultiplexing
+def get_sample_dirs(wc):
+    return [
+        os.path.join(DATA_DIR, input_sample)
+        for input_sample in SAMPLES.keys()
+    ]
+
+wildcard_constraints:
+    input_sample="|".join(SAMPLES.keys()),
+    sample="|".join(DEMULTIPLEX_SAMPLES.keys())
+
+
+def get_demux_reads(sample):
+    return DEMULTIPLEX_SAMPLES[sample]['reads']
+
+
+def get_fastqc_targets(wc=None):
+    """Return explicit FastQC HTML target paths for every demultiplexed sample.
+
+    Building them here avoids trying to use expand with a function that
+    returns values dependent on another wildcard.
+    """
+    targets = [
+        os.path.join(RESULTS_DIR, "fastqc", demux_key, f"{info['reads']}_fastqc.html")
+        for demux_key, info in DEMULTIPLEX_SAMPLES.items()
+    ]
+    return targets
 
 rule all:
     input:
-        os.path.join(RESULTS_DIR, "fastqc", sample, sample_reads, sample_reads+"_fastqc.html") for sample in SAMPLES.keys() for sample_reads in SAMPLES[sample]["reads"]
+        get_fastqc_targets
+
+checkpoint demultiplex:
+    input:
+        r1=lambda wc: os.path.join(RESOURCES_DIR, wc.input_sample, f"{SAMPLES[wc.input_sample]['reads']}.fastq.gz"),
+        index=lambda wc: os.path.join(RESOURCES_DIR, wc.input_sample, f"{SAMPLES[wc.input_sample]['index']}.fastq.gz")
+    output:
+        directory(os.path.join(DATA_DIR, "{input_sample}")),
+    params:
+        index_seqs=lambda wc: SAMPLES[wc.input_sample]["index_seqs"],
+    log:
+        os.path.join(LOGS_DIR, "demultiplex", "{input_sample}.log")
+    conda:
+        "envs/demultiplex.yaml"
+    script:
+        "scripts/demultiplex.py"
 
 rule FastQC:
     input:
-        os.path.join(DATA_DIR, "{sample}", "{sample_reads}.fastq.gz")
+        demux_samples_for_wildcard,
     output:
-        os.path.join(RESULTS_DIR, "fastqc", "{sample}", "{sample_reads}", "{sample_reads}_fastqc.html")
+        os.path.join(RESULTS_DIR, "fastqc", "{sample}", "{sample_reads}_fastqc.html")
     params:
-        out_dir=os.path.join(RESULTS_DIR, "fastqc", "{sample}", "{sample_reads}")
+        out_dir=lambda wc: os.path.join(RESULTS_DIR, "fastqc", wc.sample)
     log:
         os.path.join(LOGS_DIR, "fastqc", "{sample}", "{sample_reads}.log")
     conda:
         "envs/fastqc.yaml"
     shell:
         """
-        mkdir -p {params.out_dir}
-        fastqc {input} --outdir {params.out_dir} > {log} 2>&1
+            mkdir -p {params.out_dir}
+            fastqc {input} --outdir {params.out_dir} > {log} 2>&1
         """
