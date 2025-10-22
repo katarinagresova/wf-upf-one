@@ -3,13 +3,7 @@ import sys
 import glob
 
 # Load config
-if "--configfile" in sys.argv:
-    i = sys.argv.index("--configfile")
-    config_path = sys.argv[i + 1]
-    configfile: config_path
-else:
-    config_path = "config/config.yaml"
-    configfile: config_path
+configfile: "config/config.yaml"
 
 RESOURCES_DIR = config["RESOURCES_DIR"]
 DATA_DIR = config["DATA_DIR"]
