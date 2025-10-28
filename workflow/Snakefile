@@ -7,7 +7,6 @@ import glob
 
 # Load config
 configfile: "config/config.yaml"
-#container: "docker://continuumio/miniconda3:25.3.1-1"
 #container: "docker://continuumio/miniconda3:23.10.0-1"
 
 RESOURCES_DIR = config["RESOURCES_DIR"]
@@ -49,6 +48,13 @@ def get_demultiplexed_reads(wc):
     # Return path to demultiplexed reads
     return os.path.join(out_dir, f"{info['reads']}.fastq.gz")
 
+# def get_fastq_inputs(wc):
+#     """
+#     We want to run FastQC several times, on different stages of read processing:
+#     - on demultiplexed reads
+#     - on trimmed reads
+#     """
+
 # define sample dirs as output of demultiplexing
 def get_sample_dirs(wc):
     return [
@@ -58,7 +64,13 @@ def get_sample_dirs(wc):
 
 wildcard_constraints:
     input_sample="|".join(SAMPLES.keys()),
-    sample="|".join(DEMULTIPLEX_SAMPLES.keys())
+    sample="|".join(DEMULTIPLEX_SAMPLES.keys()),
+    sample_reads="|".join(
+        [info['reads'] for info in DEMULTIPLEX_SAMPLES.values()]
+    )
+
+ruleorder:
+    cutadapt > FastQC_trimmed
 
 
 def get_demux_reads(sample):
@@ -89,6 +101,19 @@ def get_umi_reads_targets(wc=None):
     ]
     return targets
 
+
+def get_fastqc_trimmed_targets(wc=None):
+    """Return explicit FastQC HTML target paths for every trimmed sample.
+
+    Building them here avoids trying to use expand with a function that
+    returns values dependent on another wildcard.
+    """
+    targets = [
+        os.path.join(RESULTS_DIR, "fastqc", demux_key, f"{info['reads']}_trim_fastqc.html")
+        for demux_key, info in DEMULTIPLEX_SAMPLES.items()
+    ]
+    return targets
+
 # # import workflow for data preparation
 # module clip:
 #     snakefile: github("katarinagresova/clip_pipeline", path="workflow/Snakefile", branch="main")
@@ -109,6 +134,7 @@ def get_umi_reads_targets(wc=None):
 rule all:
     input:
         get_fastqc_targets,
+        get_fastqc_trimmed_targets,
         get_umi_reads_targets,
         
 
@@ -121,31 +147,20 @@ rule cutadapt:
       None if "--use-singularity" in sys.argv else "envs/cutadapt.yaml"
     container:
       "docker://quay.io/biocontainers/cutadapt:3.5--py39h38f01e4_0"
-    #log: 
-    #  "results/logs/cutadapt_{sample}.log" 
-    #threads: config["THR"]
+    log: 
+        os.path.join(LOGS_DIR, "process_reads", "{sample}", "{sample_reads}_cutadapt.log")
+    threads: config["THR"]
     params:
       three_prime_adapter_sequence=config["THREE_PRIME_ADAPTER_SEQUENCE"],
-      five_prime_adapter_sequence=config["FIVE_PRIME_ADAPTER_SEQUENCE"],
-      nineteen_nucleotide_marker_sequence=config["NINETEEN_NUCLEOTIDE_MARKER_SEQUENCE"],
-      twenty_four_nucleotide_marker_sequence=config["TWENTY_FOUR_NUCLEOTIDE_MARKER_SEQUENCE"],
-      kit_5adapter=config["KIT_5ADAPTER"],
-      iclip_adapter=config["ICLIP_ADAPTER"],
-      hitsclip_3adapter=config["HITSCLIP_3ADAPTER"],
-      hitsclip_5adapter=config["HITSCLIP_5ADAPTER"],
-      special_ad_1=config["SPECIAL_AD_1"],
-      special_ad_2=config["SPECIAL_AD_2"],
-      special_ad_3=config["SPECIAL_AD_3"],
       repeat_n_times=2,
       match_read_wildcards=18
     shell:
-      """
-     cutadapt -a {params.three_prime_adapter_sequence} -g {params.five_prime_adapter_sequence}  \
-                -b {params.nineteen_nucleotide_marker_sequence} -b {params.twenty_four_nucleotide_marker_sequence}  \
-                -b {params.kit_5adapter} -b {params.iclip_adapter} -b {params.hitsclip_3adapter} -b {params.hitsclip_5adapter}  \
-                -b {params.special_ad_1} -b {params.special_ad_2} -b {params.special_ad_3}  \
-                -j {threads} -n {params.repeat_n_times} -m {params.match_read_wildcards} -o {output.fastq} {input.fastq} 
-      """
+        """
+        cutadapt -a {params.three_prime_adapter_sequence}  \
+            -j {threads} -n {params.repeat_n_times}  \
+            -m {params.match_read_wildcards}  \
+            -o {output.fastq} {input.fastq}
+        """
 
 rule extract_UMIs:
     input:
@@ -206,3 +221,23 @@ rule FastQC:
             mkdir -p {params.out_dir}
             fastqc {input} --outdir {params.out_dir} > {log} 2>&1
         """
+
+rule FastQC_trimmed:
+    input:
+        os.path.join(RESULTS_DIR, "process_reads", "{sample}", "{sample_reads}_trim.fastq.gz"),
+    output:
+        os.path.join(RESULTS_DIR, "fastqc", "{sample}", "{sample_reads}_trim_fastqc.html")
+    params:
+        out_dir=lambda wc: os.path.join(RESULTS_DIR, "fastqc", wc.sample)
+    log:
+        os.path.join(LOGS_DIR, "fastqc", "{sample}", "{sample_reads}_trim.log")
+    conda:
+        None if "--use-singularity" in sys.argv else "envs/fastqc.yaml"
+    container: 
+        "docker://biocontainers/fastqc:v0.11.9_cv8"
+    shell:
+        """
+            mkdir -p {params.out_dir}
+            fastqc {input} --outdir {params.out_dir} > {log} 2>&1
+        """
+
