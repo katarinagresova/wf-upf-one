@@ -114,6 +114,15 @@ def get_fastqc_trimmed_targets(wc=None):
     ]
     return targets
 
+def get_aligned_targets(wc=None):
+    """Return explicit aligned BAM target paths for every trimmed sample."""
+
+    targets = [
+        os.path.join(RESULTS_DIR, "alignments", demux_key, f"{info['reads']}_aligned.bam")
+        for demux_key, info in DEMULTIPLEX_SAMPLES.items()
+    ]
+    return targets
+
 # # import workflow for data preparation
 # module clip:
 #     snakefile: github("katarinagresova/clip_pipeline", path="workflow/Snakefile", branch="main")
@@ -136,6 +145,8 @@ rule all:
         get_fastqc_targets,
         get_fastqc_trimmed_targets,
         get_umi_reads_targets,
+        directory(os.path.join(DATA_DIR, "reference", "STAR_index")),
+        get_aligned_targets,
         
 
 rule cutadapt:
@@ -159,28 +170,28 @@ rule cutadapt:
         cutadapt -a {params.three_prime_adapter_sequence}  \
             -j {threads} -n {params.repeat_n_times}  \
             -m {params.match_read_wildcards}  \
-            -o {output.fastq} {input.fastq}
+            -o {output.fastq} {input.fastq} > {log} 2>&1
         """
 
 rule extract_UMIs:
     input:
-      fastq=os.path.join(RESULTS_DIR, "process_reads", "{sample}", "{sample_reads}_trim.fastq.gz"),
+        fastq=os.path.join(RESULTS_DIR, "process_reads", "{sample}", "{sample_reads}_trim.fastq.gz"),
     output:
-      processed=os.path.join(RESULTS_DIR, "process_reads", "{sample}", "{sample_reads}_trim_umi.fastq.gz")
+        processed=os.path.join(RESULTS_DIR, "process_reads", "{sample}", "{sample_reads}_trim_umi.fastq.gz")
     container:
-      "docker://quay.io/biocontainers/umi_tools:1.1.2--py310h1425a21_1"
+        "docker://quay.io/biocontainers/umi_tools:1.1.2--py310h1425a21_1"
     conda:
         None if  "--use-singularity" in sys.argv else "envs/umi-tools.yaml"
     log:
-      os.path.join(LOGS_DIR, "umi_tools_extract", "{sample}", "{sample_reads}.log")
+        os.path.join(LOGS_DIR, "umi_tools_extract", "{sample}", "{sample_reads}.log")
     resources:
-      mem_mb_per_cpu='8G'
+        mem_mb_per_cpu='8G'
     params:
-      pattern=lambda wc: config['UMI-BARCODE']
+        pattern=lambda wc: config['UMI-BARCODE']
     shell:
-      """
-      umi_tools extract --stdin={input.fastq} --extract-method=string --bc-pattern={params.pattern:q} --log={log} --stdout {output.processed}
-      """
+        """
+        umi_tools extract --stdin={input.fastq} --extract-method=string --bc-pattern={params.pattern:q} --log={log} --stdout {output.processed}
+        """
 
 # Define demultiplexing rule as a checkpoint to allow downstream rules to depend on its output
 # Output of this rule can be accessed 
@@ -241,3 +252,91 @@ rule FastQC_trimmed:
             fastqc {input} --outdir {params.out_dir} > {log} 2>&1
         """
 
+rule download_ref_genome:
+    output:
+        fasta=os.path.join(DATA_DIR, "reference", config["REFERENCE_GENOME_FASTA"] + ".fa"),
+        gtf=os.path.join(DATA_DIR, "reference", config["REFERENCE_GENOME_GTF"] + ".gtf")
+    params:
+        url=config["REFERENCE_GENOME_URL"],
+        fasta=config["REFERENCE_GENOME_FASTA"],
+        gtf=config["REFERENCE_GENOME_GTF"]
+    container:
+        "docker://ysebastia/wget:1.25.0-r2"
+    log:
+        os.path.join(LOGS_DIR, "download_ref_genome.log")
+    shell:
+        """
+        wget -O {output.fasta}.gz {params.url}/fasta/saccharomyces_cerevisiae/dna/{params.fasta}.fa.gz > {log} 2>&1
+        gunzip -c {output.fasta}.gz > {output.fasta}
+        wget -O {output.gtf}.gz {params.url}/gtf/saccharomyces_cerevisiae/{params.gtf}.gtf.gz > {log} 2>&1
+        gunzip -c {output.gtf}.gz > {output.gtf}
+        """
+
+rule star_index:
+    input:
+        fasta=os.path.join(DATA_DIR, "reference", config["REFERENCE_GENOME_FASTA"] + ".fa"),
+        gtf=os.path.join(DATA_DIR, "reference", config["REFERENCE_GENOME_GTF"] + ".gtf")
+    output:
+        directory(os.path.join(DATA_DIR, "reference", "STAR_index"))
+    conda:
+        None if "--use-singularity" in sys.argv else "envs/star.yaml"
+    container:
+        "docker://mgibio/star:2.7.0f"
+    log:
+        os.path.join(LOGS_DIR, "star_index.log")
+    threads: config["THR"]
+    params:
+        sjdb_overhang=49
+    shell:
+        """
+        mkdir -p {output}
+        STAR --runThreadN {threads} \
+            --runMode genomeGenerate \
+            --genomeDir {output} \
+            --genomeFastaFiles {input.fasta} \
+            --genomeSAindexNbases 10 \
+            --sjdbGTFfile {input.gtf} \
+            --sjdbOverhang {params.sjdb_overhang} \
+            > {log} 2>&1
+        """
+
+rule star_align:
+    input:
+        fasta=os.path.join(DATA_DIR, "reference", config["REFERENCE_GENOME_FASTA"] + ".fa"),
+        star_index=os.path.join(DATA_DIR, "reference", "STAR_index"),
+        reads=os.path.join(RESULTS_DIR, "process_reads", "{sample}", "{sample_reads}_trim_umi.fastq.gz")
+    output:
+        bam=os.path.join(RESULTS_DIR, "alignments", "{sample}", "{sample_reads}_aligned.bam")
+    conda:
+        None if "--use-singularity" in sys.argv else "envs/star.yaml"
+    container:
+        "docker://mgibio/star:2.7.0f"
+    log:
+        os.path.join(LOGS_DIR, "star_align", "{sample}", "{sample_reads}.log")
+    threads: config["THR"]
+    params:
+        out_prefix=lambda wc: os.path.join(RESULTS_DIR, "alignments", wc.sample, wc.sample_reads + "_"),
+        out_filter_multimap_nmax=1
+    shell:
+        """
+
+        STAR --runMode alignReads \
+            --runThreadN {threads} \
+            --genomeDir {input.star_index} \
+            --readFilesIn {input.reads} \
+            --readFilesCommand zcat \
+            --outSAMtype BAM SortedByCoordinate \
+            --outFilterType BySJout \
+            --outFilterMultimapNmax {params.out_filter_multimap_nmax} \
+            --alignSJoverhangMin 8 \
+            --alignSJDBoverhangMin 1 \
+            --outFilterMismatchNmax 999 \
+            --outFilterMismatchNoverLmax 0.04 \
+            --scoreDelOpen -1 \
+            --alignIntronMin 20 \
+            --alignIntronMax 1000000 \
+            --alignMatesGapMax 1000000 \
+            --outFileNamePrefix {params.out_prefix} \
+            --alignEndsType "Extend5pOfRead1" \
+        && mv {params.out_prefix}Aligned.out.bam {output.bam} > {log} 2>&1
+        """
