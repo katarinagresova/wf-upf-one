@@ -209,6 +209,7 @@ __marimo__/
 # Custom
 data/
 results/
+resources/
 
 .snakemake/
 .DS_Store
